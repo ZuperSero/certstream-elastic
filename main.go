@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/gorilla/websocket"
 	"github.com/namsral/flag"
 )
@@ -89,6 +90,7 @@ func populateFlags() (*flag.FlagSet, error) {
 	fs.String("domain_filter", "", "comma seperated domain to match against")
 	fs.String("elastic_token", "", "Elasticsearch token")
 	fs.String("elastic_url", "", "Elasticsearch URL")
+	fs.String("elastic_namespace", "prod", "Elasticsearch data stream name")
 	fs.Parse(os.Args[1:])
 
 	if fs.Lookup("elastic_token").Value.String() == "" {
@@ -100,13 +102,72 @@ func populateFlags() (*flag.FlagSet, error) {
 	return fs, nil
 }
 
-func publishToElasticsearch(ctx context.Context, es *elastic.Client, index string, document interface{}) error {
+type X509 struct {
+	AltNames           []interface{}          `json:"alternative_names"`
+	Issuer             map[string]interface{} `json:"issuer"`
+	Subject            map[string]interface{} `json:"subject"`
+	NotBefore          int64                  `json:"not_before"`
+	NotAfter           int64                  `json:"not_after"`
+	SerialNumber       string                 `json:"serial_number"`
+	SignatureAlgorithm string                 `json:"signature_algorithm"`
+}
 
-	req := elastic.IndexRequest{
-		Index:    index,
-		Body:     document,
-		Pipeline: "certstreamer",
+type CertData struct {
+	Timestamp string `json:"@timestamp"`
+	X509      X509   `json:"x509"`
+}
+
+func populateCertData(data map[string]interface{}) (CertData, error) {
+	leafCert, ok := data["data"].(map[string]interface{})["leaf_cert"]
+	if !ok {
+		return CertData{}, errors.New("leaf_cert not found")
 	}
+
+	certData := CertData{
+		Timestamp: time.Now().Format(time.RFC3339),
+		X509: X509{
+			AltNames:           leafCert.(map[string]interface{})["all_domains"].([]interface{}),
+			Issuer:             leafCert.(map[string]interface{})["issuer"].(map[string]interface{}),
+			Subject:            leafCert.(map[string]interface{})["subject"].(map[string]interface{}),
+			NotBefore:          int64(leafCert.(map[string]interface{})["not_before"].(float64)),
+			NotAfter:           int64(leafCert.(map[string]interface{})["not_after"].(float64)),
+			SerialNumber:       leafCert.(map[string]interface{})["serial_number"].(string),
+			SignatureAlgorithm: leafCert.(map[string]interface{})["signature_algorithm"].(string),
+		},
+	}
+	return certData, nil
+}
+
+func createIndexTemplate(es *elasticsearch.Client, templateName string) error {
+	var templateDefinition = `
+	{
+	  "index_patterns": ["logs-certstreamer-*"],
+	  "data_stream": {},
+	  "template": {
+		"mappings": {
+		  "properties": {
+			"@timestamp": { "type": "date" },
+			"x509": {
+			  "properties": {
+				"alternative_names": { "type": "keyword" },
+				"issuer": { "type": "nested" },
+				"subject": { "type": "nested" },
+				"not_before": { "type": "date" },
+				"not_after": { "type": "date" },
+				"serial_number": { "type": "keyword" },
+				"signature_algorithm": { "type": "keyword" }
+			  }
+			}
+		  }
+		}
+	  }
+	}
+	`
+	_, err := es.Indices.PutIndexTemplate(templateName, strings.NewReader(string(templateDefinition)))
+	if err != nil {
+		return fmt.Errorf("error creating index template: %w", err)
+	}
+	return nil
 }
 
 func main() {
@@ -122,6 +183,16 @@ func main() {
 	var conn *websocket.Conn
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Create Elastic Client
+	es, err := elasticsearch.NewClient(elasticsearch.Config{
+		Addresses: []string{fs.Lookup("elastic_url").Value.String()},
+		APIKey:    fs.Lookup("elastic_token").Value.String(),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	createIndexTemplate(es, "logs-certstreamer-"+fs.Lookup("elastic_namespace").Value.String())
 
 	for {
 		// Attempt to connect or reconnect with backoff
@@ -145,12 +216,21 @@ func main() {
 				}
 
 				if filterDomains(data, domains) {
-					jsonData, _ := json.MarshalIndent(data, "", "  ")
+					event, err := populateCertData(data)
+					if err != nil {
+						log.Printf("Error populating cert data: %s\n", err)
+						continue
+					}
+					document, err := json.Marshal(event)
 					if err != nil {
 						log.Printf("Error marshalling JSON: %s\n", err)
 						continue
 					}
-					log.Printf("Match: %s\n", jsonData)
+					_, err = es.Index("logs-certstreamer-"+fs.Lookup("elastic_namespace").Value.String(), strings.NewReader(string(document)))
+					if err != nil {
+						log.Printf("Error indexing document: %s\n", err)
+					}
+
 				}
 			}
 		}
