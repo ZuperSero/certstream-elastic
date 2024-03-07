@@ -38,6 +38,9 @@ func reconnect(ctx context.Context) (*websocket.Conn, error) {
 			log.Println("Connection established")
 			return conn, nil // Successful connection established
 		}
+		if err != nil {
+			log.Printf("Error connecting to CertStream: %s\n", err)
+		}
 
 		select {
 		case <-ctx.Done():
@@ -106,15 +109,25 @@ type X509 struct {
 	AltNames           []interface{}          `json:"alternative_names"`
 	Issuer             map[string]interface{} `json:"issuer"`
 	Subject            map[string]interface{} `json:"subject"`
-	NotBefore          int64                  `json:"not_before"`
-	NotAfter           int64                  `json:"not_after"`
+	Extensions         map[string]interface{} `json:"extensions"`
+	NotBefore          string                 `json:"not_before"`
+	NotAfter           string                 `json:"not_after"`
 	SerialNumber       string                 `json:"serial_number"`
 	SignatureAlgorithm string                 `json:"signature_algorithm"`
+	fingerprint        string                 `json:"fingerprint"`
+	
+}
+
+type Source struct {
+	Name string `json:"name"`
+	Url  string `json:"url"`
 }
 
 type CertData struct {
 	Timestamp string `json:"@timestamp"`
 	X509      X509   `json:"x509"`
+	Message   string `json:"message"`
+	Source    Source `json:"source"`
 }
 
 func populateCertData(data map[string]interface{}) (CertData, error) {
@@ -122,17 +135,27 @@ func populateCertData(data map[string]interface{}) (CertData, error) {
 	if !ok {
 		return CertData{}, errors.New("leaf_cert not found")
 	}
+	source, ok := data["data"].(map[string]interface{})["source"]
+	if !ok {
+		return CertData{}, errors.New("source not found")
+	}
 
 	certData := CertData{
-		Timestamp: time.Now().Format(time.RFC3339),
+		Timestamp: time.Unix(int64(data["data"].(map[string]interface{})["seen"].(float64)), 0).Format(time.RFC3339),
+		Message:   data["message_type"].(string),
+		Source: Source{
+			Name: source.(map[string]interface{})["name"].(string),
+			Url:  source.(map[string]interface{})["url"].(string),
+		},
 		X509: X509{
 			AltNames:           leafCert.(map[string]interface{})["all_domains"].([]interface{}),
 			Issuer:             leafCert.(map[string]interface{})["issuer"].(map[string]interface{}),
 			Subject:            leafCert.(map[string]interface{})["subject"].(map[string]interface{}),
-			NotBefore:          int64(leafCert.(map[string]interface{})["not_before"].(float64)),
-			NotAfter:           int64(leafCert.(map[string]interface{})["not_after"].(float64)),
+			NotBefore:          time.Unix(int64(leafCert.(map[string]interface{})["not_before"].(float64)), 0).Format(time.RFC3339),
+			NotAfter:           time.Unix(int64(leafCert.(map[string]interface{})["not_after"].(float64)), 0).Format(time.RFC3339),
 			SerialNumber:       leafCert.(map[string]interface{})["serial_number"].(string),
 			SignatureAlgorithm: leafCert.(map[string]interface{})["signature_algorithm"].(string),
+			Extensions:         leafCert.(map[string]interface{})["extensions"].(map[string]interface{}),
 		},
 	}
 	return certData, nil
@@ -147,6 +170,13 @@ func createIndexTemplate(es *elasticsearch.Client, templateName string) error {
 		"mappings": {
 		  "properties": {
 			"@timestamp": { "type": "date" },
+			"message": { "type": "text" },
+			"source": {
+				"properties": {
+					"name": { "type": "keyword" },
+					"url": { "type": "keyword" }
+				}
+			},
 			"x509": {
 			  "properties": {
 				"alternative_names": { "type": "keyword" },
@@ -155,7 +185,9 @@ func createIndexTemplate(es *elasticsearch.Client, templateName string) error {
 				"not_before": { "type": "date" },
 				"not_after": { "type": "date" },
 				"serial_number": { "type": "keyword" },
-				"signature_algorithm": { "type": "keyword" }
+				"signature_algorithm": { "type": "keyword" },
+				"extensions": { "type": "nested" },
+				"fingerprint": { "type": "keyword" }
 			  }
 			}
 		  }
@@ -192,7 +224,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	createIndexTemplate(es, "logs-certstreamer-"+fs.Lookup("elastic_namespace").Value.String())
+	createIndexTemplate(es, "logs-certstreamer")
 
 	for {
 		// Attempt to connect or reconnect with backoff
@@ -226,6 +258,7 @@ func main() {
 						log.Printf("Error marshalling JSON: %s\n", err)
 						continue
 					}
+					fmt.Println(string(document))
 					_, err = es.Index("logs-certstreamer-"+fs.Lookup("elastic_namespace").Value.String(), strings.NewReader(string(document)))
 					if err != nil {
 						log.Printf("Error indexing document: %s\n", err)

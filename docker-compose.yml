@@ -1,0 +1,11 @@
+version: "3.8"
+services:
+  certstreamer:
+    build: .
+    container_name: certstreamer
+    restart: always
+    environment:
+    - ${CERTSTREAMER_DOMAIN_FILTER}
+    - ${CERTSTREAMER_ELASTIC_TOKEN}
+    - ${CERTSTREAMER_ELASTIC_URL}
+    - ${CERTSTREAMER_ELASTIC_NAMESPACE}
