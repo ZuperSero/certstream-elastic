@@ -23,5 +23,5 @@ jobs:
         uses: docker/build-push-action@v3
         with:
           push: true
-          tags: ${{ secrets.DOCKERHUB_USER }}/certstream-elastic:latest,${{ secrets.DOCKERHUB_USER }}/certstream-elastic:${{ steps.get-commit-sha.outputs.COMMIT_SHA }}
+          tags: ${{ env.DOCKERHUB_USER }}/certstream-elastic:latest,${{ env.DOCKERHUB_USER }}/certstream-elastic:${{ steps.get-commit-sha.outputs.COMMIT_SHA }}
 
