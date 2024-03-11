@@ -22,6 +22,6 @@ jobs:
       - name: Build and Push Docker Image
         uses: docker/build-push-action@v3
         with:
+          context: .
           push: true
-          tags: ${{ vars.DOCKERHUB_USER }}/certstream-elastic:latest,${{ vars.DOCKERHUB_USER }}/certstream-elastic:${{ steps.get-commit-sha.outputs.COMMIT_SHA }}
-
+          tags: ${{ vars.DOCKERHUB_USER }}/certstream-elastic:latest
