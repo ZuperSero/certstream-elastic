@@ -10,9 +10,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get Latest Commit SHA
-        run: echo ::set-output name=COMMIT_SHA  sh echo $(git rev-parse --short HEAD)
-
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
